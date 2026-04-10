@@ -1,4 +1,3 @@
-# main.py - 天花板定位系统主服务器（支持多建筑物 + FLANN + RANSAC + 时序检查）
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,33 +10,28 @@ import os
 from pathlib import Path
 from collections import deque
 
-# ==================== 创建FastAPI应用 ====================
 app = FastAPI(
-    title="天花板定位系统",
-    description="基于计算机视觉的室内定位系统，使用手机摄像头拍摄天花板图像",
-    version="2.1"  # 版本号增加
+    title="Ceiling positioning system",
+    description="An indoor positioning system based on computer vision uses a mobile phone camera to capture images of the ceiling",
+    version="2.1"
 )
 
-# ==================== 允许网页访问（CORS设置） ====================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 开发时允许所有来源，生产环境要限制
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # 允许所有HTTP方法
-    allow_headers=["*"],  # 允许所有HTTP头
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ==================== 挂载静态文件 ====================
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ==================== 全局变量 ====================
-# 数据库结构：{ building_name: { location_id: { keypoints, descriptors, ... } } }
+
+
 database = {}
 
-# ORB特征检测器（与建库时参数一致）
 orb = cv2.ORB_create(nfeatures=1500)
 
-# FLANN参数（针对ORB二进制描述符）
 FLANN_INDEX_LSH = 6
 index_params = dict(
     algorithm=FLANN_INDEX_LSH,
@@ -47,30 +41,19 @@ index_params = dict(
 )
 search_params = dict(checks=50)
 
-# ==================== 新增：时序检查相关全局变量 ====================
-# 会话历史存储结构：key = session_id 或 client_ip, value = deque 每个元素为 (timestamp, building, floor, number)
+# ==================== Time series check related global variables ====================
 session_history = {}
-HISTORY_MAXLEN = 5      # 每个会话最多保留最近5次记录
-TIME_WINDOW = 60        # 300秒内认为连续移动（超过此时间视为新会话）
-# =============================================================
-# ==================== 新增：时序检查相关全局变量 ====================
-# 会话历史存储结构：key = session_id 或 client_ip, value = deque 每个元素为 (timestamp, building, floor, number)
-session_history = {}
-HISTORY_MAXLEN = 5      # 每个会话最多保留最近5次记录
-TIME_WINDOW = 300       # 300秒内认为连续移动（超过此时间视为新会话）
+HISTORY_MAXLEN = 5
+TIME_WINDOW = 60
 
-# 🎯 核心升级：拓扑图连接字典 (只记录合法相连的交叉路口)
-# 格式: "建筑物_走廊名_步数"
 VALID_JUNCTIONS = {
     "Earl Mountbatten Building_CorridorA_0": ["Earl Mountbatten Building_CorridorB_0"],
     "Earl Mountbatten Building_CorridorB_0": ["Earl Mountbatten Building_CorridorA_0"],
     "Colin Maclaurin Building_CorridorC_0": ["Colin Maclaurin Building_CorridorD_0"],
     "Colin Maclaurin Building_CorridorD_0": ["Colin Maclaurin Building_CorridorC_0"]
 }
-# =============================================================
 
 def deserialize_keypoint(kp_data):
-    """将字典转换为OpenCV KeyPoint对象"""
     kp = cv2.KeyPoint()
     kp.pt = (kp_data["pt"][0], kp_data["pt"][1])
     kp.size = kp_data["size"]
@@ -80,13 +63,9 @@ def deserialize_keypoint(kp_data):
 
 
 def match_with_flann_ransac(query_desc, query_kp, db_desc, db_kp):
-    """
-    使用FLANN匹配 + 适配ORB的距离测试 + RANSAC几何验证
-    """
     if query_desc is None or db_desc is None or len(query_desc) < 2 or len(db_desc) < 2:
         return 0, 0, 0.0
 
-    # FLANN匹配器
     flann = cv2.FlannBasedMatcher(index_params, search_params)
     knn_matches = flann.knnMatch(query_desc, db_desc, k=2)
 
@@ -101,23 +80,20 @@ def match_with_flann_ransac(query_desc, query_kp, db_desc, db_kp):
                 good_matches.append(match_pair[0])
 
     total_matches = len(good_matches)
-    if total_matches < 10:  # 匹配点太少，无法进行RANSAC
+    if total_matches < 10:
         return 0, total_matches, 0.0
 
-    # 提取匹配点坐标
     src_pts = np.float32([query_kp[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
     dst_pts = np.float32([db_kp[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
-    # RANSAC计算单应性矩阵
     M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
 
     if mask is None:
         return 0, total_matches, 0.0
 
-    inliers = np.sum(mask)  # 内点数量
+    inliers = np.sum(mask)
     inlier_ratio = inliers / total_matches
 
-    # 计算匹配分数：综合考虑内点数量和比例
     score = inliers * inlier_ratio
 
     return int(inliers), total_matches, score
@@ -151,7 +127,6 @@ def check_temporal_consistency(session_key, new_building, new_floor, new_number)
 
     last_time, last_building, last_floor, last_number = history[-1]
 
-    # 1. 检查是否在同一条走廊内直走 (执行一维动态步数校验)
     if new_building == last_building:
         if last_number is not None and new_number is not None:
             time_elapsed = now - last_time
@@ -161,44 +136,36 @@ def check_temporal_consistency(session_key, new_building, new_floor, new_number)
                 return False, f"Unrealistic jump: pos_{last_number:03d} to pos_{new_number:03d} over {int(time_elapsed)}s."
         return True, ""
 
-    # 2. 检查是否在合法的交叉路口拐弯 (执行拓扑图校验)
-    # 注意：这里的 new_building 实际上包含 "Building_Corridor"
     last_node = f"{last_building}_{last_number}"
     new_node = f"{new_building}_{new_number}"
 
     valid_neighbors = VALID_JUNCTIONS.get(last_node, [])
 
     if new_node in valid_neighbors:
-        return True, ""  # 属于合法的拐弯
+        return True, ""
 
-    # 3. 如果名字不一样，且不在合法邻居字典里，说明是非法跳跃 (跨楼宇/穿墙)
     return False, f"Warning: Building changed (from {last_building} to {new_building})."
 
 
-# ==================== 服务器启动事件 ====================
+# ==================== Server startup event ====================
 @app.on_event("startup")
 async def startup_event():
-    """服务器启动时自动运行"""
     global database
     print("=" * 60)
     print("The ceiling positioning system is activated")
     print("=" * 60)
     print("The database is being loaded...")
 
-    # 检查是否有数据库文件
     db_file = Path("database.json")
     if db_file.exists():
         try:
             with open("database.json", "r", encoding='utf-8') as f:
                 raw_data = json.load(f)
 
-            # 重建数据库，将描述符转回numpy数组，关键点转为OpenCV对象
             for building_name, locations in raw_data.items():
                 database[building_name] = {}
                 for loc_id, loc_data in locations.items():
-                    # 转换描述符
                     desc = np.array(loc_data["descriptors"], dtype=np.uint8)
-                    # 转换关键点
                     kp_list = [deserialize_keypoint(k) for k in loc_data["keypoints"]]
                     database[building_name][loc_id] = {
                         "filename": loc_data["filename"],
@@ -212,11 +179,11 @@ async def startup_event():
             print(f"   The number of buildings：{len(database)}")
             print(f"   Total number of positions：{total_locations}")
         except Exception as e:
-            print(f"数据库加载失败: {e}")
-            print("   请先运行 database.py 建立数据库")
+            print(f"Database loading failed: {e}")
+            print("   Please run database.py set up a database")
     else:
-        print("找不到数据库文件 database.json")
-        print("   请先运行 database.py 建立数据库")
+        print("The database file cannot be found database.json")
+        print("   Please run database.py set up a database")
 
     print("")
     print("server information：")
@@ -231,11 +198,10 @@ async def startup_event():
     print("=" * 60)
 
 
-# ==================== API端点定义 ====================
+# ==================== API endpoint definition ====================
 
 @app.get("/")
 async def home():
-    """返回系统主页（HTML页面）"""
     html_content = """
     <!DOCTYPE html>
     <html lang="en">
@@ -244,9 +210,6 @@ async def home():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Ceiling Localization System</title>
         <style>
-            /* =========================================
-               基础变量与全局设定 (日间/夜间模式)
-               ========================================= */
             :root {
                 --bg-color: #fafafa;
                 --bg-radial: radial-gradient(circle at 50% 100%, rgba(244, 114, 182, 0.25) 0%, transparent 50%),
@@ -290,7 +253,6 @@ async def home():
 
             .container { max-width: 850px; margin: 20px auto; }
 
-            /* 玻璃质感圆角卡片 */
             .ui-card {
                 background: var(--card-bg);
                 border-radius: 24px;
@@ -303,9 +265,6 @@ async def home():
                 transition: all 0.4s ease;
             }
 
-            /* =========================================
-               标题与文本样式
-               ========================================= */
             .header-section { text-align: center; position: relative; }
             .gradient-title {
                 font-size: 2.6rem;
@@ -319,7 +278,6 @@ async def home():
             .dyn-subtext { color: var(--text-sub); }
             .section-title { font-size: 1.5em; color: var(--text-main); margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid var(--border-color); transition: color 0.4s; }
 
-            /* 深色模式切换按钮 */
             .theme-btn {
                 position: absolute; right: 0; top: 0;
                 border-radius: 12px; background: transparent; border: 1px solid var(--border-color);
@@ -329,9 +287,6 @@ async def home():
             .theme-btn:hover { background: rgba(148, 163, 184, 0.1); }
             body.dark-mode .theme-btn { background: rgba(30, 41, 59, 0.5); }
 
-            /* =========================================
-               对齐交互区 (按钮与输入)
-               ========================================= */
             .upload-box { text-align: center; }
             .file-input { display: none; }
             
@@ -378,14 +333,10 @@ async def home():
 
             #fileName { margin-top: 15px; color: var(--text-sub); font-style: italic; font-size: 0.95em; }
 
-            /* =========================================
-               结果展示区
-               ========================================= */
             .result-box { display: none; animation: fadeIn 0.5s; margin-top: 0; }
             .result-box.show { display: block; }
             @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 
-            /* 状态提示框适配深色模式 */
             .status-box { padding: 15px 20px; border-radius: 12px; margin-bottom: 25px; font-weight: 600; border: 1px solid transparent; }
             .success { color: #155724; background: rgba(212, 237, 218, 0.8); border-color: #c3e6cb; }
             body.dark-mode .success { color: #86efac; background: rgba(21, 128, 61, 0.2); border-color: #166534; }
@@ -396,7 +347,6 @@ async def home():
             .processing { color: #0c5460; background: rgba(209, 236, 241, 0.8); border-color: #bee5eb; margin-top: 20px; }
             body.dark-mode .processing { color: #7dd3fc; background: rgba(3, 105, 161, 0.2); border-color: #0c4a6e; }
 
-            /* 详情网格卡片 */
             .result-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
             .inner-card { 
                 background: rgba(255, 255, 255, 0.4);
@@ -499,7 +449,6 @@ async def home():
         </div>
 
         <script>
-            // 核心逻辑保持完全不变
             const fileInput = document.getElementById('fileInput');
             const uploadBtn = document.getElementById('uploadBtn');
             const fileName = document.getElementById('fileName');
@@ -508,13 +457,11 @@ async def home():
             const statusDiv = document.getElementById('status');
             const themeToggle = document.getElementById('themeToggle');
 
-            // 主题切换逻辑
             themeToggle.addEventListener('click', () => {
                 document.body.classList.toggle('dark-mode');
                 const isDark = document.body.classList.contains('dark-mode');
                 localStorage.setItem('theme', isDark ? 'dark' : 'light');
             });
-            // 记住用户的主题选择
             if (localStorage.getItem('theme') === 'dark') {
                 document.body.classList.add('dark-mode');
             }
@@ -607,7 +554,7 @@ async def upload_image(
             return JSONResponse(status_code=400,
                                 content={"status": "error", "message": "Cannot read image. Invalid format."})
 
-        # 图像预处理 (缩放)
+        # Image preprocessing (scaling)
         height, width = img.shape
         if height > 800 or width > 800:
             scale = 800 / max(height, width)
@@ -652,30 +599,21 @@ async def upload_image(
         THRESHOLD = 4.0
 
         if best_score > THRESHOLD:
-            # 更新历史记录
             now = time.time()
             history = session_history.get(session_key, [])
             history.append((now, building, floor, number))
             if len(history) > HISTORY_MAXLEN: history.pop(0)
             session_history[session_key] = history
 
-            # 终极修复：精简显示，自动去除重复的建筑物名称
             parts = best_location_id.split('_pos_')
             if len(parts) > 1:
-                # parts[0] 此时是 "Earl Mountbatten Building_CorridorA"
-                # best_building 是 "Earl Mountbatten Building"
-                # 我们利用字符串替换，把建筑物名字和连接的下划线自动删掉，只留下走廊名
                 corridor_raw = parts[0].replace(f"{best_building}_", "")
                 corridor_name = corridor_raw.replace('_', ' ')
 
-                # parts[1] 是位置和房间号 (例如 "04_G39")
                 friendly_suffix = parts[1].replace('_', ' ')
-                # 将它们拼接在一起
                 friendly_location = f"{corridor_name} - Pos {friendly_suffix}"
             else:
                 friendly_location = best_location_id
-
-            # 如果时序检查没通过，给一个警告，但不阻止结果显示
             status_msg = "Localization Successful" if temporal_pass else f"Warning: {temporal_message}"
             status_type = "success" if temporal_pass else "warning"
 
@@ -703,26 +641,24 @@ async def upload_image(
 
 @app.get("/api/health")
 async def health_check():
-    """健康检查端点，用于监控系统状态"""
     status = {
         "status": "healthy",
         "service": "ceiling-localization",
         "buildings": list(database.keys()),
         "total_locations": sum(len(v) for v in database.values()),
-        "algorithm": "ORB + FLANN + RANSAC + 时序检查",
+        "algorithm": "ORB + FLANN + RANSAC + Timing Check",
         "timestamp": time.time()
     }
 
     if not database:
         status["status"] = "warning"
-        status["message"] = "数据库为空，请运行 database.py"
+        status["message"] = "The database is empty.Please run database.py"
 
     return status
 
 
 @app.get("/api/database")
 async def get_database():
-    """获取数据库信息"""
     result = {}
     for building_name, locations in database.items():
         result[building_name] = {}
@@ -739,7 +675,7 @@ async def get_database():
     }
 
 
-# ==================== 服务器启动 ====================
+# ==================== Server startup ====================
 if __name__ == "__main__":
     import uvicorn
 

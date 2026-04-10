@@ -1,55 +1,53 @@
-# database.py - 建立天花板图像特征数据库（支持多建筑物）
 import cv2
 import numpy as np
 import json
 from pathlib import Path
 
 def build_database():
-    """建立多建筑物天花板图像数据库"""
     print("=" * 60)
-    print("🏢 多建筑物天花板图像数据库构建工具")
+    print("Multi-Building Ceiling Image Database Builder")
     print("=" * 60)
 
-    # 初始化ORB特征检测器（增加特征点数量，便于匹配）
+    # Initialize ORB feature detector (increase number of keypoints for better matching)
     orb = cv2.ORB_create(nfeatures=1500)
 
     database = {}
     database_dir = Path("database")
 
     if not database_dir.exists():
-        print("❌ 错误：找不到 database 文件夹！")
-        print("请先创建 database 文件夹，并在其中按建筑物组织图片。")
+        print("Error: database folder not found!")
+        print("Please create a 'database' folder first and organize images by building inside it.")
         return
 
-    # 获取所有建筑物子文件夹
+    # Get all building subdirectories
     building_dirs = [d for d in database_dir.iterdir() if d.is_dir()]
     if not building_dirs:
-        print("❌ 错误：database 文件夹下没有建筑物子文件夹！")
-        print("请创建如 Mary_Burton、Colin_Maclaurin 等子文件夹。")
+        print("Error: No building subdirectories found under the database folder!")
+        print("Please create subdirectories like Mary_Burton, Colin_Maclaurin, etc.")
         return
 
-    print(f"找到 {len(building_dirs)} 个建筑物：{[d.name for d in building_dirs]}")
+    print(f"Found {len(building_dirs)} buildings: {[d.name for d in building_dirs]}")
 
-    # 遍历每个建筑物
+    # Iterate through each building
     for building_dir in building_dirs:
         building_name = building_dir.name
-        print(f"\n📁 处理建筑物：{building_name}")
+        print(f"\n📁 Processing building: {building_name}")
         database[building_name] = {}
 
-        # 递归查找所有图片文件
+        # Recursively find all image files
         image_files = list(building_dir.rglob("*.jpg")) + list(building_dir.rglob("*.png"))
         if not image_files:
-            print(f"   ⚠ 该建筑物下没有图片")
+            print(f"   No images found in this building")
             continue
 
-        print(f"   找到 {len(image_files)} 张图片")
+        print(f"   Found {len(image_files)} images")
 
-        # 遍历该建筑物下的所有图片
+        # Iterate through all images in the building
         for img_path in image_files:
-            # 读取灰度图
+            # Read as grayscale image
             img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
             if img is None:
-                print(f"   ⚠ 无法读取：{img_path.name}")
+                print(f"   Cannot read: {img_path.name}")
                 continue
 
 
@@ -61,20 +59,20 @@ def build_database():
                 img = cv2.resize(img, (new_width, new_height))
             img = cv2.equalizeHist(img)
 
-            # 提取ORB特征
+            # Extract ORB features
             keypoints, descriptors = orb.detectAndCompute(img, None)
 
             if descriptors is None or len(keypoints) < 10:
-                print(f"   ⚠ 特征点太少：{img_path.name}")
+                print(f"   Too few keypoints: {img_path.name}")
                 continue
 
-            # 生成位置ID：相对路径（相对于 database 文件夹）去掉扩展名，用下划线连接
-            # 例如：Mary_Burton/floor_1/pos_001 -> Mary_Burton_floor_1_pos_001
+            # Generate location ID: relative path (relative to database folder) without extension, joined by underscores
+            # Example: Mary_Burton/floor_1/pos_001 -> Mary_Burton_floor_1_pos_001
             relative_path = img_path.relative_to(database_dir)
             location_id = str(relative_path.with_suffix('')).replace('/', '_').replace('\\', '_')
-            print(f"   ✅ 位置ID：{location_id} 特征点：{len(keypoints)}")
+            print(f"   Location ID: {location_id} Keypoints: {len(keypoints)}")
 
-            # 存储关键点坐标（用于RANSAC）
+            # Store keypoint coordinates (used for RANSAC)
             keypoints_data = []
             for kp in keypoints:
                 keypoints_data.append({
@@ -84,7 +82,7 @@ def build_database():
                     "response": float(kp.response)
                 })
 
-            # 存储到数据库
+            # Store in database
             database[building_name][location_id] = {
                 "filename": str(img_path),
                 "keypoints": keypoints_data,
@@ -92,14 +90,14 @@ def build_database():
                 "keypoints_count": len(keypoints)
             }
 
-    # 保存数据库到JSON文件
+    # Save database to JSON file
     output_file = "database.json"
     with open(output_file, "w") as f:
         json.dump(database, f, indent=2)
 
     print("\n" + "=" * 60)
-    print("✅ 数据库构建完成！")
-    print(f"   输出文件：{output_file}")
+    print("Database construction completed!")
+    print(f"   Output file: {output_file}")
     print("=" * 60)
     return database
 
