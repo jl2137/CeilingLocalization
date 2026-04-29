@@ -1,5 +1,5 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-opencv-python==4.13.0.90  # 改为你安装的版本
-numpy==2.4.2              # 改为你安装的版本
-python-multipart==0.0.22  # 改为你安装的版本
+opencv-python==4.13.0.90
+numpy==2.4.2
+python-multipart==0.0.22
